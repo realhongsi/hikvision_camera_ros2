@@ -1,0 +1,27 @@
+hikvision_camera_node:
+  ros__parameters:
+    device_ip: "192.168.1.64"
+    port: 8000
+    username: "admin"
+    password: "qwer1234"   # Set your camera password
+    channel_visible: 1     # Visible image channel
+    channel_ir: 2          # IR image channel (use 1 if single-channel camera)
+    frame_rate: 25.0       # Hz (used when use_rtsp=false for SDK JPEG capture)
+    camera_frame_id: "camera_optical_frame"
+    ir_frame_id: "ir_optical_frame"
+    # RTSP mode: smooth high-FPS stream (default). Set false to use SDK JPEG capture (low FPS).
+    use_rtsp: true
+    # Reduce latency: smaller OpenCV buffer + ROS2 queue depth 1 (default true).
+    low_latency: true
+    # Use sub stream (Channels/102, 202) for lower latency. Web: 영상 → 스트림 유형 "서브 스트림".
+    use_sub_stream: true
+    # false = both use GStreamer (latency=0, IR과 지연 비슷). true = 가시광만 FFmpeg (가시광이 끊기면 시도).
+    camera_use_ffmpeg: false
+    rtsp_camera_url: ""    # Leave empty: main=101/201, sub=102/202
+    rtsp_ir_url: ""
+    # Publish temperature on /camera/ir/temperature_info. Order: min, max, avg [, env_temp [, humidity]]. Only valid values (no -999).
+    # Fetched in background (no video blocking). If SDK fails, uses ISAPI (HTTP Digest). Requires libcurl. Set false to disable.
+    publish_temperature_topic: true
+    # How often to fetch temperature in background (seconds). 1.0 = smooth video; lower = more load.
+    temperature_poll_interval: 1.0
+    # To reduce 1~2s delay: camera web (영상) → I-frame interval = 1 (minimum), frame rate 25 fps
