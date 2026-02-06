@@ -1,7 +1,9 @@
 /**
  * Hikvision Camera ROS2 Node
  * - RTSP mode (default): smooth high-FPS stream via OpenCV VideoCapture
- * - SDK mode: JPEG capture (low FPS, 1~3 Hz)
+ * - Temperature: ISAPI (HTTP Digest) when USE_HIKVISION_SDK=0; else SDK + ISAPI fallback
+ * - SDK mode (JPEG capture): only when USE_HIKVISION_SDK=1
+ * Build with USE_HIKVISION_SDK=0 for ARM64 (no SDK; RTSP + ISAPI only).
  */
 
 #include <algorithm>
@@ -23,7 +25,11 @@
 #include <opencv2/opencv.hpp>
 #include <opencv2/videoio.hpp>
 
+#if USE_HIKVISION_SDK
 #include "HCNetSDK.h"
+#else
+typedef long LONG;
+#endif
 
 namespace hikvision_camera_ros2
 {
@@ -33,9 +39,11 @@ class HikvisionCameraNode : public rclcpp::Node
 public:
   HikvisionCameraNode()
   : Node("hikvision_camera_node"),
-    user_id_(-1),
-    sdk_initialized_(false),
-    running_(false)
+    running_(false),
+    user_id_(-1)
+#if USE_HIKVISION_SDK
+    , sdk_initialized_(false)
+#endif
   {
     declare_parameter<std::string>("device_ip", "192.168.1.64");
     declare_parameter<int>("port", 8000);
@@ -82,11 +90,20 @@ public:
     }
 
     if (use_rtsp_) {
+#if !USE_HIKVISION_SDK
+      if (password_.empty() && publish_temperature_topic_) {
+        RCLCPP_WARN(get_logger(), "password empty; ISAPI temperature will fail.");
+      }
+#endif
       if (publish_temperature_topic_) {
+#if USE_HIKVISION_SDK
         if (!init_sdk_and_login()) {
           RCLCPP_INFO(get_logger(), "SDK login failed; temperature will be fetched via ISAPI (HTTP Digest) when available.");
         }
-        RCLCPP_INFO(get_logger(), "Publishing temperature on /camera/ir/temperature_info (cached, poll every %.1f s; no block on video).", temperature_poll_interval_);
+#else
+        RCLCPP_INFO(get_logger(), "Temperature via ISAPI only (no SDK).");
+#endif
+        RCLCPP_INFO(get_logger(), "Publishing temperature on /camera/ir/temperature_info (cached, poll every %.1f s).", temperature_poll_interval_);
         running_temp_ = true;
         temperature_thread_ = std::thread(&HikvisionCameraNode::temperature_background_loop, this);
       }
@@ -96,6 +113,10 @@ public:
         std::bind(&HikvisionCameraNode::publish_buffered_frames, this));
       start_rtsp();
     } else {
+#if !USE_HIKVISION_SDK
+      RCLCPP_ERROR(get_logger(), "SDK capture mode requires USE_HIKVISION_SDK; use use_rtsp:=true for RTSP+ISAPI only.");
+      return;
+#else
       if (!init_sdk_and_login()) {
         RCLCPP_ERROR(get_logger(), "Failed to init SDK or login.");
         return;
@@ -105,6 +126,7 @@ public:
         temperature_thread_ = std::thread(&HikvisionCameraNode::temperature_background_loop, this);
       }
       start_sdk_capture();
+#endif
     }
   }
 
@@ -115,8 +137,10 @@ public:
     if (temperature_thread_.joinable()) temperature_thread_.join();
     if (rtsp_thread_.joinable()) rtsp_thread_.join();
     if (rtsp_ir_thread_.joinable()) rtsp_ir_thread_.join();
+#if USE_HIKVISION_SDK
     if (user_id_ >= 0) NET_DVR_Logout_V30(user_id_);
     if (sdk_initialized_) NET_DVR_Cleanup();
+#endif
   }
 
 private:
@@ -240,6 +264,9 @@ private:
 
   bool init_sdk_and_login()
   {
+#if !USE_HIKVISION_SDK
+    return true;
+#else
     if (password_.empty()) {
       RCLCPP_ERROR(get_logger(), "Parameter 'password' is empty.");
       return false;
@@ -261,8 +288,10 @@ private:
       return false;
     }
     return true;
+#endif
   }
 
+#if USE_HIKVISION_SDK
   template<size_t N>
   void copy_string_to_field(char (&field)[N], const std::string& s, size_t max_len)
   {
@@ -270,9 +299,16 @@ private:
     std::memcpy(field, s.c_str(), len);
     field[len] = '\0';
   }
+#endif
 
   bool fetch_temperature_info(LONG channel, float& temp_c, float& humidity)
   {
+#if !USE_HIKVISION_SDK
+    (void)channel;
+    (void)temp_c;
+    (void)humidity;
+    return false;
+#else
     if (user_id_ < 0) return false;
     NET_DVR_TEMP_HUMI_INFO info = {};
     info.dwSize = sizeof(NET_DVR_TEMP_HUMI_INFO);
@@ -284,10 +320,18 @@ private:
     temp_c = info.fTemperature;
     humidity = info.fHumidity;
     return true;
+#endif
   }
 
   bool fetch_manual_therm(LONG channel, float& max_t, float& min_t, float& avg_t)
   {
+#if !USE_HIKVISION_SDK
+    (void)channel;
+    (void)max_t;
+    (void)min_t;
+    (void)avg_t;
+    return false;
+#else
     if (user_id_ < 0) return false;
     NET_SDK_MANUAL_THERMOMETRY therm = {};
     therm.dwSize = sizeof(NET_SDK_MANUAL_THERMOMETRY);
@@ -303,10 +347,17 @@ private:
     avg_t = r.struRegionTherm.fAverageTemperature;
     if (r.byRuleID == 0 || !r.byEnable) return false;
     return true;
+#endif
   }
 
   bool fetch_realtime_therm(LONG channel, float& min_t, float& max_t)
   {
+#if !USE_HIKVISION_SDK
+    (void)channel;
+    (void)min_t;
+    (void)max_t;
+    return false;
+#else
     if (user_id_ < 0) return false;
     NET_DVR_THERMOMETRY_UPLOAD upload = {};
     upload.dwSize = sizeof(NET_DVR_THERMOMETRY_UPLOAD);
@@ -318,6 +369,7 @@ private:
     min_t = upload.fLowestPointTemperature;
     max_t = upload.fHighestPointTemperature;
     return true;
+#endif
   }
 
   static size_t curl_write_cb(char* ptr, size_t size, size_t nmemb, void* userdata)
@@ -361,9 +413,10 @@ private:
   {
     const double kNa = -999.0;
     double min_t = kNa, max_t = kNa, avg_t = kNa, env_temp = kNa, humidity = kNa;
+
+#if USE_HIKVISION_SDK
     LONG ch_ir = static_cast<LONG>(channel_ir_);
     LONG ch1 = 1;
-
     float f_min = 0.f, f_max = 0.f, f_avg = 0.f;
     if (fetch_realtime_therm(ch_ir, f_min, f_max)) {
       min_t = static_cast<double>(f_min);
@@ -393,6 +446,7 @@ private:
         humidity = static_cast<double>(f_hum);
       }
     }
+#endif
 
     if (min_t == kNa && max_t == kNa && avg_t == kNa) {
       float fm = 0.f, fx = 0.f, fa = 0.f;
@@ -406,9 +460,14 @@ private:
     if (min_t == kNa && max_t == kNa && env_temp == kNa) {
       if (!temp_fail_logged_) {
         temp_fail_logged_ = true;
+#if USE_HIKVISION_SDK
         RCLCPP_WARN(get_logger(),
           "[temperature_info] All temp APIs failed (SDK err %lu). Temperature will be updated via ISAPI in background. Set publish_temperature_topic: false to disable.",
           static_cast<unsigned long>(NET_DVR_GetLastError()));
+#else
+        RCLCPP_WARN(get_logger(),
+          "[temperature_info] ISAPI temperature unavailable. Set publish_temperature_topic: false to disable.");
+#endif
       }
     }
 
@@ -463,6 +522,7 @@ private:
       pub_temperature_->publish(msg);
   }
 
+#if USE_HIKVISION_SDK
   void start_sdk_capture()
   {
     double period_sec = 1.0 / frame_rate_;
@@ -504,6 +564,7 @@ private:
     std::shared_ptr<cv_bridge::CvImage> cv_ptr = std::make_shared<cv_bridge::CvImage>(header, "bgr8", img);
     pub->publish(*cv_ptr->toImageMsg());
   }
+#endif
 
   rclcpp::Publisher<sensor_msgs::msg::Image>::SharedPtr pub_camera_;
   rclcpp::Publisher<sensor_msgs::msg::Image>::SharedPtr pub_ir_;
@@ -549,7 +610,9 @@ private:
   double cached_humidity_{-999.0};
 
   LONG user_id_;
+#if USE_HIKVISION_SDK
   bool sdk_initialized_;
+#endif
   bool temp_fail_logged_{false};
 };
 
