@@ -5,14 +5,14 @@ if(CMAKE_COMPILER_IS_GNUCXX OR CMAKE_CXX_COMPILER_ID MATCHES "Clang")
   add_compile_options(-Wall -Wextra -Wpedantic)
 endif()
 
-# SDK path: auto-detect when in deploy layout (src/hikvision_camera_ros2 + sdk/), else -D or env
+# SDK path: 1) package-local sdk/ (clone-and-build), 2) env -D, 3) parent ..
 set(HIKVISION_SDK_ROOT "" CACHE PATH "Hikvision SDK root")
 if(NOT HIKVISION_SDK_ROOT AND DEFINED ENV{HIKVISION_SDK_ROOT})
   set(HIKVISION_SDK_ROOT "$ENV{HIKVISION_SDK_ROOT}" CACHE PATH "" FORCE)
 endif()
 if(NOT HIKVISION_SDK_ROOT)
-  if(EXISTS "${CMAKE_CURRENT_SOURCE_DIR}/../../sdk/incEn/HCNetSDK.h")
-    set(HIKVISION_SDK_ROOT "${CMAKE_CURRENT_SOURCE_DIR}/../../sdk" CACHE PATH "" FORCE)
+  if(EXISTS "${CMAKE_CURRENT_SOURCE_DIR}/sdk/incEn/HCNetSDK.h")
+    set(HIKVISION_SDK_ROOT "${CMAKE_CURRENT_SOURCE_DIR}/sdk" CACHE PATH "" FORCE)
   else()
     set(HIKVISION_SDK_ROOT "${CMAKE_CURRENT_SOURCE_DIR}/.." CACHE PATH "" FORCE)
   endif()
@@ -23,13 +23,24 @@ set(HIKVISION_LIB_DIR "${HIKVISION_SDK_ROOT}/lib")
 if(NOT EXISTS "${HIKVISION_INCLUDE_DIR}/HCNetSDK.h")
   message(FATAL_ERROR
     "Hikvision SDK not found at: ${HIKVISION_SDK_ROOT}\n"
-    "  In deploy layout, ensure sdk/ (incEn, lib) is next to src/. Or:\n"
-    "  colcon build --packages-select hikvision_camera_ros2 --cmake-args -DHIKVISION_SDK_ROOT=/path/to/sdk")
+    "  Put sdk/ (incEn + lib) inside this package, or:\n"
+    "  colcon build --cmake-args -DHIKVISION_SDK_ROOT=/path/to/sdk")
 endif()
 if(NOT EXISTS "${HIKVISION_LIB_DIR}/libhcnetsdk.so")
   message(FATAL_ERROR "Hikvision SDK lib not found at: ${HIKVISION_LIB_DIR}")
 endif()
 message(STATUS "Hikvision SDK: ${HIKVISION_SDK_ROOT}")
+
+# Install SDK libs next to executables so run from install works on any PC
+set(SDK_LIBS_INSTALL_DIR "lib/${PROJECT_NAME}/sdk_libs")
+install(DIRECTORY ${HIKVISION_LIB_DIR}/
+  DESTINATION ${SDK_LIBS_INSTALL_DIR}
+  USE_SOURCE_PERMISSIONS
+  FILES_MATCHING PATTERN "*.so" PATTERN "*.so.*")
+install(DIRECTORY ${HIKVISION_LIB_DIR}/HCNetSDKCom/
+  DESTINATION ${SDK_LIBS_INSTALL_DIR}/HCNetSDKCom
+  USE_SOURCE_PERMISSIONS
+  FILES_MATCHING PATTERN "*.so")
 
 find_package(ament_cmake REQUIRED)
 find_package(rclcpp REQUIRED)
@@ -38,6 +49,10 @@ find_package(cv_bridge REQUIRED)
 find_package(std_msgs REQUIRED)
 find_package(OpenCV REQUIRED)
 find_package(CURL REQUIRED)
+find_package(message_filters REQUIRED)
+find_package(rosidl_default_generators REQUIRED)
+
+rosidl_generate_interfaces(${PROJECT_NAME} "msg/ImagePair.msg" DEPENDENCIES sensor_msgs)
 
 include_directories(
   include
@@ -58,22 +73,37 @@ target_link_libraries(hikvision_camera_node
   ${OpenCV_LIBS}
 )
 
-# RPATH so executable finds SDK libs when run from install
+# RPATH: installed executable finds SDK libs in sdk_libs/ next to it (relocatable)
 set_target_properties(hikvision_camera_node PROPERTIES
-  INSTALL_RPATH "${HIKVISION_LIB_DIR};${HIKVISION_LIB_DIR}/HCNetSDKCom"
+  INSTALL_RPATH "\$ORIGIN/sdk_libs;\$ORIGIN/sdk_libs/HCNetSDKCom"
   BUILD_WITH_INSTALL_RPATH TRUE
-  INSTALL_RPATH_USE_LINK_PATH TRUE
+  INSTALL_RPATH_USE_LINK_PATH FALSE
 )
+
+add_executable(image_rotate_node src/image_rotate_node.cpp)
+ament_target_dependencies(image_rotate_node rclcpp sensor_msgs cv_bridge)
+target_link_libraries(image_rotate_node ${OpenCV_LIBS})
+
+add_executable(image_sync_node src/image_sync_node.cpp)
+ament_target_dependencies(image_sync_node rclcpp sensor_msgs message_filters)
+target_link_libraries(image_sync_node "${PROJECT_NAME}__rosidl_typesupport_cpp")
+target_include_directories(image_sync_node PRIVATE
+  ${CMAKE_CURRENT_BINARY_DIR}/rosidl_generator_cpp
+  ${CMAKE_CURRENT_SOURCE_DIR}/include)
 
 install(TARGETS
   hikvision_camera_node
+  image_rotate_node
+  image_sync_node
   DESTINATION lib/${PROJECT_NAME}
 )
 
 install(DIRECTORY
   launch
   config
+  msg
   DESTINATION share/${PROJECT_NAME}
 )
 
+ament_export_dependencies(rosidl_default_runtime)
 ament_package()
